@@ -4,12 +4,24 @@
   "regions": ["iad1"],
   "rewrites": [
     {
-      "source": "/",
-      "destination": "/api"
+      "source": "/health",
+      "destination": "/api/health"
     },
     {
-      "source": "/(.*)",
-      "destination": "/api/$1"
+      "source": "/ok",
+      "destination": "/api/ok"
+    },
+    {
+      "source": "/pull",
+      "destination": "/api/pull"
+    },
+    {
+      "source": "/enqueue",
+      "destination": "/api/enqueue"
+    },
+    {
+      "source": "/",
+      "destination": "/api"
     }
   ],
   "headers": [
