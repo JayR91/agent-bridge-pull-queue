@@ -22,6 +22,29 @@ async function withSecret(fn) {
   }
 }
 
+test("GET /health and /ok return {ok:true} without consuming the queue", async () => {
+  await withSecret(async () => {
+    const put = await handleRequest(
+      new Request("http://127.0.0.1/", {
+        method: "PUT",
+        headers: { authorization: `Bearer ${SECRET}`, "x-signature": SIG },
+        body: BODY,
+      }),
+    );
+    assert.equal(put.status, 200);
+
+    for (const url of ["http://127.0.0.1/health", "http://127.0.0.1/ok", "http://127.0.0.1/api/health"]) {
+      const health = await handleRequest(new Request(url));
+      assert.equal(health.status, 200);
+      assert.deepEqual(await health.json(), { ok: true, service: "agent-bridge-pull-queue" });
+    }
+
+    const got = await handleRequest(new Request("http://127.0.0.1/"));
+    assert.equal(got.status, 200);
+    assert.equal(await got.text(), BODY);
+  });
+});
+
 test("GET is 204 when the queue is empty", async () => {
   await withSecret(async () => {
     await handleRequest(
