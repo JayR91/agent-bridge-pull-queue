@@ -6,20 +6,27 @@ Repo: [github.com/JayR91/agent-bridge-pull-queue](https://github.com/JayR91/agen
 
 ## Public pull URL
 
-**GET (phone):** `https://temporary-swift-walnut-a35ekgf.vercel.app/`
+**Phone Desk → Agent Bridge “Command pull”:** `https://TEMPORARY-URL-PENDING-DEPLOY/`
 
-Aliases: `GET /` and `GET /pull`.
+Liveness: `GET /health` and `GET /ok` return `{"ok":true,"service":"agent-bridge-pull-queue"}` and do **not** consume a queued command.
 
-That URL is a Vercel anonymous production deploy. **Claim it** so it does not expire (~1 hour if unclaimed):
+Aliases for command pull: `GET /` and `GET /pull`.
 
-https://vercel.com/claim-deployment?code=3fdf1a32-48a2-4ebf-a405-58d6709545e7
+This README is updated with the live URL after deploy. If the host is a Vercel anonymous/`temporary-*.vercel.app` preview, **claim it under JayR91** so it does not expire:
 
-After claiming, set `QUEUE_SECRET` in the Vercel project env (Production) if you redeploy. Writes use `Authorization: Bearer <QUEUE_SECRET>`.
+1. Open the claim URL printed in this section after deploy.
+2. Sign in to Vercel as the JayR91 / jayradbus@gmail.com account.
+3. Transfer the project (name it `agent-bridge-pull-queue`).
+4. In **Project → Settings → Environment Variables**, set `QUEUE_SECRET` (Production + Preview) to a long random string. Do not commit it.
+5. Redeploy Production, then connect GitHub repo `JayR91/agent-bridge-pull-queue` so later pushes keep the same `*.vercel.app` production domain.
+
+Writes use `Authorization: Bearer <QUEUE_SECRET>`. HMAC for the command body uses the phone API token, not `QUEUE_SECRET`.
 
 ## Contract
 
 | Method | Path | Auth | Behavior |
 | --- | --- | --- | --- |
+| `GET` | `/health` or `/ok` | none | **200** `{"ok":true,"service":"agent-bridge-pull-queue"}`. Does not read or clear the queue. |
 | `GET` | `/` or `/pull` | none | If empty: **204 No Content**. If a command is waiting: **200** with the exact stored JSON bytes and `X-Signature: <hmac hex>`, then **one-shot clear**. |
 | `PUT` | `/` | `Authorization: Bearer <QUEUE_SECRET>` | Store body bytes + signature for the next phone GET. |
 | `POST` | `/enqueue` | `Authorization: Bearer <QUEUE_SECRET>` | Same as `PUT /`. |

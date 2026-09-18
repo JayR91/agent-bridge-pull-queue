@@ -4,8 +4,12 @@
   "regions": ["iad1"],
   "rewrites": [
     {
-      "source": "/(.*)",
+      "source": "/",
       "destination": "/api"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/api/$1"
     }
   ],
   "headers": [
