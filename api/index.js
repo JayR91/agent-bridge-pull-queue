@@ -1,4 +1,5 @@
 import { handleRequest } from "../lib/handler.mjs";
+import { nodeToRequest } from "../lib/node-request.mjs";
 
 export const preferredRegion = "iad1";
 
@@ -7,24 +8,6 @@ export const config = {
     bodyParser: false,
   },
 };
-
-function nodeToRequest(req, chunks) {
-  const host = req.headers.host || "localhost";
-  const proto = req.headers["x-forwarded-proto"] || "https";
-  const url = `${proto}://${host}${req.url}`;
-  const headers = new Headers();
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (value === undefined) continue;
-    headers.set(key, Array.isArray(value) ? value.join(", ") : value);
-  }
-  const method = req.method || "GET";
-  const hasBody = method !== "GET" && method !== "HEAD";
-  return new Request(url, {
-    method,
-    headers,
-    body: hasBody ? Buffer.concat(chunks) : undefined,
-  });
-}
 
 async function readChunks(req) {
   const chunks = [];
@@ -42,22 +25,36 @@ function bodyChunksFromParsed(req) {
   return [];
 }
 
-export default async function handler(req, res) {
-  if (typeof Request !== "undefined" && req instanceof Request) {
-    return handleRequest(req);
-  }
-
-  const chunks =
-    req.readable && req.readableEnded === false ? await readChunks(req) : bodyChunksFromParsed(req);
-  const response = await handleRequest(nodeToRequest(req, chunks));
-  if (!res || typeof res.writeHead !== "function") {
-    return response;
-  }
+function sendNodeResponse(res, response) {
+  if (!res || typeof res.writeHead !== "function") return response;
   const headers = {};
   response.headers.forEach((value, key) => {
     headers[key] = value;
   });
-  const body = Buffer.from(await response.arrayBuffer());
-  res.writeHead(response.status, headers);
-  res.end(body);
+  return response.arrayBuffer().then((buffer) => {
+    res.writeHead(response.status, headers);
+    res.end(Buffer.from(buffer));
+  });
+}
+
+export default async function handler(req, res) {
+  try {
+    if (typeof Request !== "undefined" && req instanceof Request) {
+      return handleRequest(req);
+    }
+
+    const chunks =
+      req.readable && req.readableEnded === false ? await readChunks(req) : bodyChunksFromParsed(req);
+    const response = await handleRequest(nodeToRequest(req, chunks));
+    return sendNodeResponse(res, response);
+  } catch {
+    const response = new Response(JSON.stringify({ error: "Internal error" }), {
+      status: 500,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
+      },
+    });
+    return sendNodeResponse(res, response);
+  }
 }
