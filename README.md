@@ -6,16 +6,22 @@ Repo: [github.com/JayR91/agent-bridge-pull-queue](https://github.com/JayR91/agen
 
 ## Public pull URL
 
-**Phone Desk → Agent Bridge “Command pull”:** `https://temporary-spry-fiddle-wofgonv.vercel.app/`
+Production host: `https://agent-bridge-pull-queue.vercel.app`
 
-That is **GET /** (also `GET /pull`). Paste this exact HTTPS URL into Agent Bridge Settings. Do **not** use `/health` for command pull.
+When `PULL_PATH_SECRET` is set (it is on production):
+
+**Phone Desk → Agent Bridge “Command pull”:** `https://agent-bridge-pull-queue.vercel.app/pull/<PULL_PATH_SECRET>`
+
+That path is the only one-shot pull. Paste the exact HTTPS URL, including the secret segment, into Agent Bridge Settings. Do **not** use `/`, `/pull`, or `/health` for command pull. `GET /` and exact `GET /pull` do not dequeue — crawlers were consuming the one-shot queue when those paths pulled.
 
 Liveness (does **not** consume a queued command):
 
-- `GET https://temporary-spry-fiddle-wofgonv.vercel.app/health` → `{"ok":true,"service":"agent-bridge-pull-queue"}`
-- `GET https://temporary-spry-fiddle-wofgonv.vercel.app/ok` → same JSON
+- `GET https://agent-bridge-pull-queue.vercel.app/health` → `{"ok":true,"service":"agent-bridge-pull-queue"}`
+- `GET https://agent-bridge-pull-queue.vercel.app/ok` → same JSON
 
-Idle pull: `GET /` → **204 No Content**.
+Idle pull: `GET /pull/<PULL_PATH_SECRET>` → **204 No Content**.
+
+Without `PULL_PATH_SECRET` (local default), `GET /` and `GET /pull` are still the pull paths.
 
 This host is a Vercel **anonymous production** deploy (`target: production`, project intended name `agent-bridge-pull-queue`). It **expires in about 60 minutes unless claimed**. The agent environment had no Vercel account login (`vercel whoami` → login required; Vercel MCP unauthenticated), so a durable named project could not be created from here. Claim it under JayR91 to keep the URL.
 
@@ -31,9 +37,9 @@ This host is a Vercel **anonymous production** deploy (`target: production`, pro
    - Environments: **Production**, **Preview**, and **Development**
    - Value: the hex already applied to this production deployment (runtime `-e`), or a new `openssl rand -hex 32` if you rotate. Never commit it. Never paste it in GitHub.
 7. **Settings → Git → Connect Git Repository** → `JayR91/agent-bridge-pull-queue` → production branch `main`.
-8. **Deployments → ⋮ on this production deploy → Redeploy**, or **Deploy** from `main`, so later pushes keep serving GET `/` on the same project.
+8. **Deployments → ⋮ on this production deploy → Redeploy**, or **Deploy** from `main`, so later pushes keep serving the secret pull path on the same project.
 
-If Vercel assigns `https://agent-bridge-pull-queue.vercel.app/` after the claim, use **that** as Command-pull (still GET `/`) and replace the temporary URL in this README.
+Command-pull on the named project is `https://agent-bridge-pull-queue.vercel.app/pull/<PULL_PATH_SECRET>` (not `GET /`).
 
 Writes use `Authorization: Bearer <QUEUE_SECRET>`. HMAC for the command body uses the phone API token, not `QUEUE_SECRET`.
 
@@ -42,10 +48,11 @@ Writes use `Authorization: Bearer <QUEUE_SECRET>`. HMAC for the command body use
 | Method | Path | Auth | Behavior |
 | --- | --- | --- | --- |
 | `GET` | `/health` or `/ok` | none | **200** `{"ok":true,"service":"agent-bridge-pull-queue"}`. Does not read or clear the queue. |
-| `GET` | `/` or `/pull` | none | If empty: **204 No Content**. If a command is waiting: **200** with the exact stored JSON bytes and `X-Signature: <hmac hex>`, then **one-shot clear**. |
-| `PUT` | `/` | `Authorization: Bearer <QUEUE_SECRET>` | Store body bytes + signature for the next phone GET. |
-| `POST` | `/enqueue` | `Authorization: Bearer <QUEUE_SECRET>` | Same as `PUT /`. |
-| `PUT`/`POST` | `/` | `Authorization: Bearer <QUEUE_SECRET>` + `X-Signature` | Raw body is stored as-is (preferred). |
+| `GET` | `/pull/<PULL_PATH_SECRET>` | none | When `PULL_PATH_SECRET` is set, this is the only pull. Empty: **204**. Waiting: **200** with the exact stored JSON bytes and `X-Signature: <hmac hex>`, then **one-shot clear**. |
+| `PUT`/`POST` | `/pull/<PULL_PATH_SECRET>` | `Authorization: Bearer <QUEUE_SECRET>` | When `PULL_PATH_SECRET` is set, enqueue on that path (same body rules as `/enqueue`). |
+| `POST` | `/enqueue` | `Authorization: Bearer <QUEUE_SECRET>` | Enqueue. Unchanged whether or not `PULL_PATH_SECRET` is set. |
+| `GET` | `/` or `/pull` | none | Pull **only** when `PULL_PATH_SECRET` is unset. When it is set, these are not pull paths. |
+| `PUT`/`POST` | `/` | `Authorization: Bearer <QUEUE_SECRET>` + `X-Signature` | Enqueue **only** when `PULL_PATH_SECRET` is unset. Raw body is stored as-is (preferred). |
 
 Safety TTL is 10 minutes if nobody GETs the command. CDN caching is disabled.
 
@@ -70,8 +77,9 @@ The phone verifies that HMAC, rejects payloads older than five minutes, and reje
 Prefer **raw body + `X-Signature`** so the bytes the phone GETs are exactly the bytes you signed.
 
 ```bash
-PULL_URL='https://temporary-spry-fiddle-wofgonv.vercel.app/'
+PULL_PATH_SECRET='paste-from-Vercel-env'
 QUEUE_SECRET='paste-from-Vercel-env'
+PULL_URL="https://agent-bridge-pull-queue.vercel.app/pull/${PULL_PATH_SECRET}"
 TOKEN='paste-the-phone-api-token'   # Agent Bridge pairing token; used only for HMAC
 
 BODY=$(jq -nc \
@@ -118,9 +126,10 @@ Point Agent Bridge Settings at `$PULL_URL`, then `POST /commands/pull` on the ph
 
 | Name | Required | Purpose |
 | --- | --- | --- |
-| `QUEUE_SECRET` | yes (writes) | Bearer token for `PUT /` and `POST /enqueue`. Generate a long random string. Never commit it. |
+| `QUEUE_SECRET` | yes (writes) | Bearer token for enqueue. Generate a long random string. Never commit it. |
+| `PULL_PATH_SECRET` | production | Path segment for `GET`/`PUT`/`POST /pull/<PULL_PATH_SECRET>`. When set, `/` and exact `/pull` do not pull. Never commit it. |
 
-Phone GET is unauthenticated on purpose: the command is already HMAC'd with the phone API token. Anyone who GETs first consumes the one-shot slot; they still cannot forge a command without the phone token.
+Phone GET on the secret path is unauthenticated on purpose: the command is already HMAC'd with the phone API token. Anyone who GETs that URL first consumes the one-shot slot; they still cannot forge a command without the phone token.
 
 ```bash
 openssl rand -hex 32
@@ -162,4 +171,6 @@ Anonymous / agent fallback (1-hour URL + claim link):
 npx vercel deploy --temporary --yes --prod --project agent-bridge-pull-queue -e QUEUE_SECRET="$QUEUE_SECRET"
 ```
 
-Or in the Vercel dashboard: **Add New… → Project → Import** `JayR91/agent-bridge-pull-queue` → name it `agent-bridge-pull-queue` → add `QUEUE_SECRET` → **Deploy**. Production Command-pull is then `https://agent-bridge-pull-queue.vercel.app/` (GET `/`).
+Or in the Vercel dashboard: **Add New… → Project → Import** `JayR91/agent-bridge-pull-queue` → name it `agent-bridge-pull-queue` → add `QUEUE_SECRET` and `PULL_PATH_SECRET` → **Deploy**. Production Command-pull is then `https://agent-bridge-pull-queue.vercel.app/pull/<PULL_PATH_SECRET>`.
+
+After this repo changes on `main`, redeploy **production** (Git auto-deploy, or Deployments → Redeploy with target Production, or `npx vercel deploy --prod --yes`). Do not rotate `QUEUE_SECRET` or `PULL_PATH_SECRET` unless you mean to.

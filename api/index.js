@@ -8,10 +8,38 @@ export const config = {
   },
 };
 
+function queryValue(value) {
+  if (Array.isArray(value)) return typeof value[0] === "string" ? value[0] : "";
+  return typeof value === "string" ? value : "";
+}
+
+function requestTarget(req) {
+  const raw = req.url || "/";
+  const host = req.headers.host || "localhost";
+  const absolute =
+    raw.startsWith("http://") || raw.startsWith("https://")
+      ? raw
+      : `http://${host}${raw.startsWith("/") ? raw : `/${raw}`}`;
+  let url;
+  try {
+    url = new URL(absolute);
+  } catch {
+    return raw;
+  }
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (/\/\[secret\](?:\.js)?$/.test(path)) {
+    const fromQuery = queryValue(req.query?.secret);
+    if (fromQuery && !url.searchParams.get("secret")) {
+      url.searchParams.set("secret", fromQuery);
+    }
+  }
+  return `${url.pathname}${url.search}`;
+}
+
 function nodeToRequest(req, chunks) {
   const host = req.headers.host || "localhost";
   const proto = req.headers["x-forwarded-proto"] || "https";
-  const url = `${proto}://${host}${req.url}`;
+  const url = `${proto}://${host}${requestTarget(req)}`;
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;

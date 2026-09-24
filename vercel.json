@@ -12,6 +12,10 @@
       "destination": "/api/ok"
     },
     {
+      "source": "/pull/:secret",
+      "destination": "/api/pull/:secret"
+    },
+    {
       "source": "/pull",
       "destination": "/api/pull"
     },
