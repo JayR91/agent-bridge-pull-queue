@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { handleRequest } from "./lib/handler.mjs";
 import { requestUrlFromNode } from "./lib/node-request.mjs";
@@ -52,6 +54,44 @@ async function enqueue(url = PULL, init = {}) {
     }),
   );
 }
+
+function listApiFiles(dir) {
+  const found = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...listApiFiles(full));
+    else if (entry.name.endsWith(".js")) found.push(full);
+  }
+  return found;
+}
+
+test("every api route file re-exports the Vercel handler", async () => {
+  const apiDir = fileURLToPath(new URL("./api/", import.meta.url));
+  const files = listApiFiles(apiDir).sort();
+  const rels = files.map((file) => file.slice(apiDir.length).split("\\").join("/"));
+  for (const required of [
+    "index.js",
+    "health.js",
+    "ok.js",
+    "enqueue.js",
+    "pull.js",
+    "pull-log.js",
+    "pull/[secret].js",
+    "result/[id].js",
+    "commands/[id].js",
+  ]) {
+    assert.ok(rels.includes(required), `missing api/${required}`);
+  }
+
+  for (const file of files) {
+    const source = readFileSync(file, "utf8");
+    assert.equal(source.includes('from "../../'), false, `${file} must not import above api/`);
+    const mod = await import(pathToFileURL(file).href);
+    assert.equal(typeof mod.default, "function", file);
+    assert.equal(mod.preferredRegion, "iad1", file);
+    assert.equal(mod.config?.api?.bodyParser, false, file);
+  }
+});
 
 test("@vercel/functions is locked for the Vercel install", () => {
   const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
