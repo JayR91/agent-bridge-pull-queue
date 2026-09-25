@@ -16,7 +16,7 @@ Liveness (does **not** read the queue): `GET /health` or `GET /ok` → `{"ok":tr
 
 Idle pull: `GET /pull/<PULL_PATH_SECRET>` → **204 No Content**.
 
-Writes use `Authorization: Bearer <QUEUE_SECRET>`. HMAC for the command body uses the phone API token, not `QUEUE_SECRET`. The FIFO needs Upstash Redis; see **Deploy**.
+Writes use `Authorization: Bearer <QUEUE_SECRET>`. HMAC for the command body uses the phone API token, not `QUEUE_SECRET`. The FIFO uses the Runtime Cache this project already has. See **Deploy**.
 
 ## Contract
 
@@ -111,21 +111,12 @@ Enqueue returns `{"ok":true,"id"}`. Companion 0.1.4 polls `$PULL_URL` about ever
 | --- | --- | --- |
 | `QUEUE_SECRET` | yes (writes) | Bearer token for `PUT /pull/<PULL_PATH_SECRET>` and `POST /enqueue`. Generate a long random string. Never commit it. |
 | `PULL_PATH_SECRET` | yes (phone pull) | Single URL path segment. The phone GETs `/pull/<PULL_PATH_SECRET>`. `GET /` is not a pull path. Generate a different long random string. Never commit it. |
-| `UPSTASH_REDIS_REST_URL` | yes on Vercel | Upstash Redis REST URL. The Vercel Marketplace integration sets this. |
-| `UPSTASH_REDIS_REST_TOKEN` | yes on Vercel | Upstash Redis REST token. Never commit it. |
+| `UPSTASH_REDIS_REST_URL` | no | Optional. With `UPSTASH_REDIS_REST_TOKEN`, the FIFO uses Upstash instead of Runtime Cache. |
+| `UPSTASH_REDIS_REST_TOKEN` | no | Optional Upstash Redis REST token. Never commit it. |
 
 Phone GET is unauthenticated beyond the unguessable path: each command is already HMAC'd with the phone API token. A pull removes the commands it returns from the FIFO. Those bytes still cannot be forged without the phone token. `GET /` does not read the queue.
 
-```bash
-openssl rand -hex 32
-```
-
-Set it on Vercel:
-
-```bash
-npx vercel env add QUEUE_SECRET
-npx vercel --prod -e QUEUE_SECRET="$QUEUE_SECRET"
-```
+Production already has `QUEUE_SECRET` and `PULL_PATH_SECRET`. This FIFO does not add env vars.
 
 ## Local run
 
@@ -139,32 +130,12 @@ npm test
 
 ## Deploy
 
-Vercel serves this as Node.js Functions under `api/`. `vercel.json` rewrites `/pull/:secret` to `/api/pull/:secret`. The handler compares that segment with `PULL_PATH_SECRET`. On Vercel the FIFO and results are stored in Upstash Redis (`iad1`). Local `npm test` uses in-memory storage. A Vercel deploy without the Upstash env vars returns **503** on enqueue and pull instead of silently keeping one command in memory.
+Vercel serves this as Node.js Functions under `api/`. `vercel.json` rewrites `/pull/:secret` to `/api/pull/:secret`. The handler compares that segment with `PULL_PATH_SECRET`.
 
-### Provision Upstash (required once)
+The one-slot queue on `main` (`71ebc6d`) already persists its command in **Vercel Runtime Cache** (`getCache()` from `@vercel/functions`, key `agent-bridge:pending-command`, 10-minute TTL) in region `iad1`. This FIFO uses that same cache. No new store and no new env vars. `QUEUE_SECRET` and `PULL_PATH_SECRET` stay as they are. A deploy without Upstash does not return 503.
 
-The project already has `QUEUE_SECRET` and `PULL_PATH_SECRET`. It does not have Redis yet.
+Keys are `agent-bridge:fifo`, `agent-bridge:cmd:<id>`, `agent-bridge:result:<id>`, and `agent-bridge:pull-log`. Each item lives for 24 hours. Runtime Cache items are capped at 2 MB, which covers a `ui.snapshot` tree plus the JPEG Companion already limits to 350 KB. On Hobby the cache is shared by the team, so the `agent-bridge:` prefix matters. It is best-effort and regional, the same durability as the old one-slot command.
 
-1. Open https://vercel.com/jayradbus-1275/agent-bridge-pull-queue/stores
-2. **Create** → **Marketplace** → **Upstash Redis** (Hobby).
-3. Connect the database to project **`agent-bridge-pull-queue`** for Production, Preview, and Development. That writes `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`. Do not rotate `QUEUE_SECRET` or `PULL_PATH_SECRET`.
-4. Merging this repo's `main` redeploys production automatically (the project is connected to `JayR91/agent-bridge-pull-queue`). Until that merge, production keeps the one-slot runtime cache. A pull request deploy is a preview URL and does not replace `https://agent-bridge-pull-queue.vercel.app`.
+If `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are both set, those are used instead. They are not required.
 
-To redeploy production by hand after the env vars exist: Vercel → project **agent-bridge-pull-queue** → Deployments → the `main` deployment → **Redeploy**.
-
-Authenticated durable project (preferred, once JayR91 is logged in):
-
-```bash
-npx vercel login
-npx vercel link --yes --project agent-bridge-pull-queue
-printf '%s' "$QUEUE_SECRET" | npx vercel env add QUEUE_SECRET production preview development
-npx vercel --prod --yes
-```
-
-Anonymous / agent fallback (1-hour URL + claim link):
-
-```bash
-npx vercel deploy --temporary --yes --prod --project agent-bridge-pull-queue -e QUEUE_SECRET="$QUEUE_SECRET"
-```
-
-Or in the Vercel dashboard: **Add New… → Project → Import** `JayR91/agent-bridge-pull-queue` → name it `agent-bridge-pull-queue` → add `QUEUE_SECRET` and `PULL_PATH_SECRET` → **Deploy**. Production Command-pull is then `https://agent-bridge-pull-queue.vercel.app/pull/<PULL_PATH_SECRET>`.
+Merging to `main` redeploys production. A pull request deploy is a preview and does not replace `https://agent-bridge-pull-queue.vercel.app`. Local `npm test` uses in-memory storage.
