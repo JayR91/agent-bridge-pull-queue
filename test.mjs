@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { handleRequest } from "./lib/handler.mjs";
 import { requestUrlFromNode } from "./lib/node-request.mjs";
+import { resetQueueForTests } from "./lib/queue.mjs";
 
 const SECRET = "test-queue-secret-0123456789abcdef";
 const PULL_SECRET = "test-pull-path-secret";
@@ -20,7 +21,7 @@ async function withSecrets(fn) {
   process.env.QUEUE_SECRET = SECRET;
   process.env.PULL_PATH_SECRET = PULL_SECRET;
   try {
-    await handleRequest(new Request(PULL));
+    await resetQueueForTests();
     return await fn();
   } finally {
     if (previousQueue === undefined) delete process.env.QUEUE_SECRET;
@@ -28,6 +29,13 @@ async function withSecrets(fn) {
     if (previousPull === undefined) delete process.env.PULL_PATH_SECRET;
     else process.env.PULL_PATH_SECRET = previousPull;
   }
+}
+
+async function commandsOf(response) {
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.ok(Array.isArray(payload.commands));
+  return payload.commands;
 }
 
 async function enqueue(url = PULL, init = {}) {
@@ -63,9 +71,9 @@ test("GET /health and /ok do not consume a queued command", async () => {
       assert.deepEqual(await health.json(), { ok: true, service: "agent-bridge-pull-queue" });
     }
 
-    const got = await handleRequest(new Request(PULL));
-    assert.equal(got.status, 200);
-    assert.equal(await got.text(), BODY);
+    const [command] = await commandsOf(await handleRequest(new Request(PULL)));
+    assert.equal(command.body, BODY);
+    assert.equal(command.signature, SIG);
   });
 });
 
@@ -84,10 +92,14 @@ test("PUT /pull/<secret> raw body + X-Signature then one-shot GET", async () => 
     const put = await enqueue();
     assert.equal(put.status, 200);
 
-    const got = await handleRequest(new Request(`${PULL}/`));
-    assert.equal(got.status, 200);
-    assert.equal(got.headers.get("x-signature"), SIG);
-    assert.equal(await got.text(), BODY);
+    const putBody = await put.json();
+    assert.equal(putBody.ok, true);
+    assert.match(putBody.id, /^[0-9a-f-]{36}$/i);
+
+    const [command] = await commandsOf(await handleRequest(new Request(`${PULL}/`)));
+    assert.equal(command.body, BODY);
+    assert.equal(command.signature, SIG);
+    assert.equal(command.id, putBody.id);
 
     const empty = await handleRequest(new Request(`http://127.0.0.1/api/pull/${PULL_SECRET}`));
     assert.equal(empty.status, 204);
@@ -107,9 +119,9 @@ test("POST /enqueue stores a string body envelope", async () => {
       }),
     );
     assert.equal(put.status, 200);
-    const got = await handleRequest(new Request(PULL));
-    assert.equal(await got.text(), BODY);
-    assert.equal(got.headers.get("x-signature"), SIG);
+    const [command] = await commandsOf(await handleRequest(new Request(PULL)));
+    assert.equal(command.body, BODY);
+    assert.equal(command.signature, SIG);
   });
 });
 
@@ -127,8 +139,8 @@ test("POST /pull/<secret> stores an object body as compact JSON", async () => {
       }),
     );
     assert.equal(put.status, 200);
-    const got = await handleRequest(new Request(PULL));
-    assert.equal(await got.text(), JSON.stringify(payload));
+    const [command] = await commandsOf(await handleRequest(new Request(PULL)));
+    assert.equal(command.body, JSON.stringify(payload));
   });
 });
 
@@ -162,9 +174,8 @@ test("root, bare /pull, and the wrong secret do not pull or enqueue", async () =
     );
     assert.equal(putRoot.status, 405);
 
-    const got = await handleRequest(new Request(PULL));
-    assert.equal(got.status, 200);
-    assert.equal(await got.text(), BODY);
+    const [command] = await commandsOf(await handleRequest(new Request(PULL)));
+    assert.equal(command.body, BODY);
   });
 });
 
@@ -178,10 +189,9 @@ test("Vercel rewrite shapes still reach the secret pull path", async () => {
     ];
     for (const url of shapes) {
       assert.equal((await enqueue(url)).status, 200, url);
-      const got = await handleRequest(new Request(url));
-      assert.equal(got.status, 200, url);
-      assert.equal(got.headers.get("x-signature"), SIG, url);
-      assert.equal(await got.text(), BODY, url);
+      const [command] = await commandsOf(await handleRequest(new Request(url)));
+      assert.equal(command.body, BODY, url);
+      assert.equal(command.signature, SIG, url);
       assert.equal((await handleRequest(new Request(url))).status, 204, url);
     }
   });
@@ -247,6 +257,95 @@ test("without PULL_PATH_SECRET, / and /pull are not pull paths", async () => {
     if (previousQueue === undefined) delete process.env.QUEUE_SECRET;
     else process.env.QUEUE_SECRET = previousQueue;
   }
+});
+
+test("enqueue assigns ids and pull returns FIFO order", async () => {
+  await withSecrets(async () => {
+    const first = await enqueue();
+    const firstId = (await first.json()).id;
+    const secondBody = BODY.replace("n-1", "n-2");
+    const second = await handleRequest(
+      new Request(PULL, {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${SECRET}`,
+          "content-type": "application/json",
+          "x-signature": SIG,
+        },
+        body: secondBody,
+      }),
+    );
+    const secondId = (await second.json()).id;
+    assert.notEqual(firstId, secondId);
+
+    const batch = await commandsOf(await handleRequest(new Request(`${PULL}?limit=1`)));
+    assert.equal(batch.length, 1);
+    assert.equal(batch[0].id, firstId);
+    assert.equal(batch[0].body, BODY);
+
+    const next = await commandsOf(await handleRequest(new Request(PULL)));
+    assert.equal(next[0].id, secondId);
+    assert.equal(next[0].body, secondBody);
+  });
+});
+
+test("phone posts a signed result and the bot can poll it", async () => {
+  await withSecrets(async () => {
+    const enqueued = await enqueue();
+    const { id } = await enqueued.json();
+    await handleRequest(new Request(PULL, { headers: { "x-device": "realme RMX3312" } }));
+
+    const resultBody = JSON.stringify({
+      status: "succeeded",
+      message: "snapshot tree",
+      screenshotBase64: "aGVsbG8=",
+    });
+    const posted = await handleRequest(
+      new Request(`http://127.0.0.1/result/${id}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-signature": SIG,
+        },
+        body: resultBody,
+      }),
+    );
+    assert.equal(posted.status, 200);
+
+    const denied = await handleRequest(new Request(`http://127.0.0.1/result/${id}`));
+    assert.equal(denied.status, 401);
+
+    const got = await handleRequest(
+      new Request(`http://127.0.0.1/result/${id}`, {
+        headers: { authorization: `Bearer ${SECRET}` },
+      }),
+    );
+    assert.equal(got.status, 200);
+    const payload = await got.json();
+    assert.equal(payload.body, resultBody);
+    assert.equal(payload.signature, SIG);
+    assert.equal(payload.status, "succeeded");
+    assert.equal(payload.message, "snapshot tree");
+    assert.equal(payload.hasScreenshot, true);
+
+    const command = await handleRequest(
+      new Request(`http://127.0.0.1/commands/${id}`, {
+        headers: { authorization: `Bearer ${SECRET}` },
+      }),
+    );
+    const commandBody = await command.json();
+    assert.equal(commandBody.state, "done");
+    assert.equal(commandBody.result.message, "snapshot tree");
+
+    const log = await handleRequest(
+      new Request("http://127.0.0.1/pull-log", {
+        headers: { authorization: `Bearer ${SECRET}` },
+      }),
+    );
+    const logBody = await log.json();
+    assert.equal(logBody.device, "realme RMX3312");
+    assert.equal(typeof logBody.lastPullEpochMs, "number");
+  });
 });
 
 test("local HTTP server does not pull / and does pull /pull/<secret>", async () => {
