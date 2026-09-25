@@ -1,1 +1,1 @@
-export { default, config, preferredRegion } from "../../index.js";
+export { default, config, preferredRegion } from "../index.js";
