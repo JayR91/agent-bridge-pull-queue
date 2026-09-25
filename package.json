@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Public HTTPS one-shot pull queue for Agent Bridge mobile-data command pull.",
+  "description": "HTTPS FIFO pull queue and result store for Agent Bridge mobile-data control.",
   "scripts": {
     "start": "node server.mjs",
     "dev": "node server.mjs",

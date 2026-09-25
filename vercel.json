@@ -12,6 +12,10 @@
       "destination": "/api/ok"
     },
     {
+      "source": "/pull/:secret",
+      "destination": "/api/pull/:secret"
+    },
+    {
       "source": "/pull",
       "destination": "/api/pull"
     },
@@ -20,8 +24,16 @@
       "destination": "/api/enqueue"
     },
     {
-      "source": "/",
-      "destination": "/api"
+      "source": "/result/:id",
+      "destination": "/api/result/:id"
+    },
+    {
+      "source": "/commands/:id",
+      "destination": "/api/commands/:id"
+    },
+    {
+      "source": "/pull-log",
+      "destination": "/api/pull-log"
     }
   ],
   "headers": [
