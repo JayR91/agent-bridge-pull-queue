@@ -22,6 +22,18 @@
     {
       "source": "/enqueue",
       "destination": "/api/enqueue"
+    },
+    {
+      "source": "/result/:id",
+      "destination": "/api/result/:id"
+    },
+    {
+      "source": "/commands/:id",
+      "destination": "/api/commands/:id"
+    },
+    {
+      "source": "/pull-log",
+      "destination": "/api/pull-log"
     }
   ],
   "headers": [
