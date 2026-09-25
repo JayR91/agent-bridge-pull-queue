@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { handleRequest } from "./lib/handler.mjs";
 import { requestUrlFromNode } from "./lib/node-request.mjs";
-import { resetQueueForTests } from "./lib/queue.mjs";
+import { queueFromStore, resetQueueForTests } from "./lib/queue.mjs";
 
 const SECRET = "test-queue-secret-0123456789abcdef";
 const PULL_SECRET = "test-pull-path-secret";
@@ -346,6 +346,61 @@ test("phone posts a signed result and the bot can poll it", async () => {
     assert.equal(logBody.device, "realme RMX3312");
     assert.equal(typeof logBody.lastPullEpochMs, "number");
   });
+});
+
+test("a Runtime Cache shaped store keeps FIFO order without Upstash", async () => {
+  const map = new Map();
+  const store = {
+    async get(key) {
+      return map.has(key) ? JSON.parse(JSON.stringify(map.get(key))) : null;
+    },
+    async set(key, value) {
+      map.set(key, JSON.parse(JSON.stringify(value)));
+    },
+    async delete(key) {
+      map.delete(key);
+    },
+  };
+  const queue = queueFromStore(store);
+  const first = await queue.enqueue({ body: BODY, signature: SIG, storedAtEpochMs: 1 });
+  const second = await queue.enqueue({ body: BODY.replace("n-1", "n-2"), signature: SIG, storedAtEpochMs: 2 });
+  const pulled = await queue.pull({ limit: 1, device: "phone", now: 10 });
+  assert.equal(pulled.length, 1);
+  assert.equal(pulled[0].id, first);
+  assert.equal(pulled[0].body, BODY);
+  assert.equal(await queue.saveResult(first, { body: '{"status":"succeeded","message":"ok"}', signature: SIG, storedAtEpochMs: 11 }), true);
+  assert.equal(JSON.parse((await queue.getResult(first)).body).message, "ok");
+  const next = await queue.pull({ limit: 5, device: "phone", now: 12 });
+  assert.equal(next[0].id, second);
+  assert.equal((await queue.getPullLog()).device, "phone");
+  assert.equal(map.has("agent-bridge:fifo"), true);
+});
+
+test("VERCEL without Upstash still enqueues and pulls", async () => {
+  const previousVercel = process.env.VERCEL;
+  const previousUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const previousToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  process.env.VERCEL = "1";
+  delete process.env.UPSTASH_REDIS_REST_URL;
+  delete process.env.UPSTASH_REDIS_REST_TOKEN;
+  try {
+    await withSecrets(async () => {
+      const put = await enqueue();
+      assert.equal(put.status, 200);
+      const { id } = await put.json();
+      assert.match(id, /^[0-9a-f-]{36}$/i);
+      const [command] = await commandsOf(await handleRequest(new Request(PULL)));
+      assert.equal(command.id, id);
+      assert.equal(command.body, BODY);
+    });
+  } finally {
+    if (previousVercel === undefined) delete process.env.VERCEL;
+    else process.env.VERCEL = previousVercel;
+    if (previousUrl === undefined) delete process.env.UPSTASH_REDIS_REST_URL;
+    else process.env.UPSTASH_REDIS_REST_URL = previousUrl;
+    if (previousToken === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    else process.env.UPSTASH_REDIS_REST_TOKEN = previousToken;
+  }
 });
 
 test("local HTTP server does not pull / and does pull /pull/<secret>", async () => {
