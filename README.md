@@ -10,45 +10,30 @@ Repo: [github.com/JayR91/agent-bridge-pull-queue](https://github.com/JayR91/agen
 
 That is **GET `/pull/<PULL_PATH_SECRET>`** (the value of the `PULL_PATH_SECRET` env var, one path segment). Paste that exact HTTPS URL into Agent Bridge Settings. Do **not** use `/`, `/pull`, or `/health` for command pull. `GET /` and `GET /pull` are not pull paths.
 
-Liveness (does **not** consume a queued command):
+Production is the Vercel project **`agent-bridge-pull-queue`** at `https://agent-bridge-pull-queue.vercel.app`. It is connected to this GitHub repo. A push to `main` redeploys that URL. A pull-request deploy is a preview and does not replace it.
 
-- `GET https://temporary-spry-fiddle-wofgonv.vercel.app/health` → `{"ok":true,"service":"agent-bridge-pull-queue"}`
-- `GET https://temporary-spry-fiddle-wofgonv.vercel.app/ok` → same JSON
+Liveness (does **not** read the queue): `GET /health` or `GET /ok` → `{"ok":true,"service":"agent-bridge-pull-queue"}`.
 
 Idle pull: `GET /pull/<PULL_PATH_SECRET>` → **204 No Content**.
 
-This host is a Vercel **anonymous production** deploy (`target: production`, project intended name `agent-bridge-pull-queue`). It **expires in about 60 minutes unless claimed**. The agent environment had no Vercel account login (`vercel whoami` → login required; Vercel MCP unauthenticated), so a durable named project could not be created from here. Claim it under JayR91 to keep the URL.
-
-### Claim this host (do this now)
-
-1. Open **https://vercel.com/claim-deployment?code=ebf70602-1928-483f-be74-fc5ace0484b4**
-2. Sign in to Vercel with GitHub as **JayR91** (`jayradbus@gmail.com`).
-3. Select your personal/Hobby team.
-4. Set the project name to **`agent-bridge-pull-queue`** (exact slug).
-5. Click **Transfer** / **Claim**.
-6. After the dashboard opens the project: **Settings → Environment Variables**.
-   - Key: `QUEUE_SECRET`
-   - Environments: **Production**, **Preview**, and **Development**
-   - Value: the hex already applied to this production deployment (runtime `-e`), or a new `openssl rand -hex 32` if you rotate. Never commit it. Never paste it in GitHub.
-7. **Settings → Git → Connect Git Repository** → `JayR91/agent-bridge-pull-queue` → production branch `main`.
-8. **Deployments → ⋮ on this production deploy → Redeploy**, or **Deploy** from `main`.
-
-Command-pull is `https://agent-bridge-pull-queue.vercel.app/pull/<PULL_PATH_SECRET>`. `GET /` is not a pull path.
-
-Writes use `Authorization: Bearer <QUEUE_SECRET>`. HMAC for the command body uses the phone API token, not `QUEUE_SECRET`.
+Writes use `Authorization: Bearer <QUEUE_SECRET>`. HMAC for the command body uses the phone API token, not `QUEUE_SECRET`. The FIFO needs Upstash Redis; see **Deploy**.
 
 ## Contract
 
 | Method | Path | Auth | Behavior |
 | --- | --- | --- | --- |
 | `GET` | `/health` or `/ok` | none | **200** `{"ok":true,"service":"agent-bridge-pull-queue"}`. Does not read or clear the queue. |
-| `GET` | `/pull/<PULL_PATH_SECRET>` | none (path secret) | If empty: **204 No Content**. If a command is waiting: **200** with the exact stored JSON bytes and `X-Signature: <hmac hex>`, then **one-shot clear**. |
-| `GET` | `/` or `/pull` | none | **Not a pull.** Does not read or clear the queue. |
-| `PUT`/`POST` | `/pull/<PULL_PATH_SECRET>` | `Authorization: Bearer <QUEUE_SECRET>` | Store body bytes + signature for the next phone GET. Same as `/enqueue`. |
-| `POST`/`PUT` | `/enqueue` | `Authorization: Bearer <QUEUE_SECRET>` | Same as `PUT /pull/<PULL_PATH_SECRET>`. |
-| `PUT`/`POST` | `/pull/<PULL_PATH_SECRET>` | `Authorization: Bearer <QUEUE_SECRET>` + `X-Signature` | Raw body is stored as-is (preferred). |
+| `GET` | `/pull/<PULL_PATH_SECRET>?limit=5` | path secret | **204** when empty. Otherwise **200** `{"commands":[{"id","body","signature"}]}` for the oldest pending commands (default 5, max 10). Those commands leave the FIFO. `X-Device` is stored on the pull log. |
+| `GET` | `/` or `/pull` | none | **Not a pull.** Does not read the queue. |
+| `PUT`/`POST` | `/pull/<PULL_PATH_SECRET>` | `Authorization: Bearer <QUEUE_SECRET>` | Append one command. **200** `{"ok":true,"id"}`. |
+| `POST`/`PUT` | `/enqueue` | `Authorization: Bearer <QUEUE_SECRET>` | Same as put on the secret pull path. |
+| `PUT`/`POST` | `/pull/<PULL_PATH_SECRET>` | bearer + `X-Signature` | Raw body is stored as-is (preferred). |
+| `POST` | `/result/<id>` | `X-Signature` of the raw body, using the phone API token | Store the phone result. **404** if that id was never enqueued. |
+| `GET` | `/result/<id>` | bearer | Poll `status`, `message` (includes a `ui.snapshot` tree), exact `body`, and `signature`. **404** until the phone posts. |
+| `GET` | `/commands/<id>` | bearer | `state` is `pending`, `pulled`, or `done`. |
+| `GET` | `/pull-log` | bearer | `{lastPullEpochMs, device}` from the last phone pull. |
 
-Safety TTL is 10 minutes if nobody GETs the command. CDN caching is disabled.
+Records live for 24 hours. CDN caching is disabled. A second enqueue does not overwrite the first.
 
 ### SignedCommandPayload
 
@@ -99,7 +84,7 @@ Envelope form (same result). Send `body` as a **string** so serialization cannot
 curl -sS -X POST "https://agent-bridge-pull-queue.vercel.app/enqueue" \
   -H "Authorization: Bearer $QUEUE_SECRET" \
   -H "Content-Type: application/json" \
-  --data "$(jq -nc --arg body "$BODY" --arg signature "$SIG" '{body:$body,signature:$signature}')"
+  --data "$(jq -nc --arg body \"$BODY\" --arg signature \"$SIG\" '{body:$body,signature:$signature}')"
 ```
 
 If `body` is a JSON object instead of a string, this host compact-`JSON.stringify`s it. That is only safe if that compact form is what you HMAC'd.
@@ -110,11 +95,15 @@ If `body` is a JSON object instead of a string, this host compact-`JSON.stringif
 # 204 when idle
 curl -sS -D - -o /dev/null "$PULL_URL"
 
-# After Volga PUTs: 200 + JSON + X-Signature, then the slot is empty again
-curl -sS -D - "$PULL_URL"
+# After enqueue: 200 {"commands":[{"id","body","signature"}]}
+curl -sS "$PULL_URL?limit=5"
+
+# Poll the result (Bearer is QUEUE_SECRET). Verify `body` with the phone token.
+curl -sS "$ORIGIN/result/$ID" -H "Authorization: Bearer $QUEUE_SECRET"
+curl -sS "$ORIGIN/pull-log" -H "Authorization: Bearer $QUEUE_SECRET"
 ```
 
-Point Agent Bridge Settings at `$PULL_URL`, then `POST /commands/pull` on the phone (Bearer = phone API token, not `QUEUE_SECRET`).
+Enqueue returns `{"ok":true,"id"}`. Companion 0.1.4 polls `$PULL_URL` about every 5 seconds and `POST`s `/result/<id>` itself. The bot never calls the phone's port 8765.
 
 ## Environment
 
@@ -122,8 +111,10 @@ Point Agent Bridge Settings at `$PULL_URL`, then `POST /commands/pull` on the ph
 | --- | --- | --- |
 | `QUEUE_SECRET` | yes (writes) | Bearer token for `PUT /pull/<PULL_PATH_SECRET>` and `POST /enqueue`. Generate a long random string. Never commit it. |
 | `PULL_PATH_SECRET` | yes (phone pull) | Single URL path segment. The phone GETs `/pull/<PULL_PATH_SECRET>`. `GET /` is not a pull path. Generate a different long random string. Never commit it. |
+| `UPSTASH_REDIS_REST_URL` | yes on Vercel | Upstash Redis REST URL. The Vercel Marketplace integration sets this. |
+| `UPSTASH_REDIS_REST_TOKEN` | yes on Vercel | Upstash Redis REST token. Never commit it. |
 
-Phone GET is unauthenticated beyond the unguessable path: the command is already HMAC'd with the phone API token. Anyone who GETs `/pull/<PULL_PATH_SECRET>` first consumes the one-shot slot; they still cannot forge a command without the phone token. `GET /` does not consume it.
+Phone GET is unauthenticated beyond the unguessable path: each command is already HMAC'd with the phone API token. A pull removes the commands it returns from the FIFO. Those bytes still cannot be forged without the phone token. `GET /` does not read the queue.
 
 ```bash
 openssl rand -hex 32
@@ -148,7 +139,18 @@ npm test
 
 ## Deploy
 
-Vercel serves this as Node.js Functions under `api/`. `vercel.json` rewrites `/pull/:secret` to `/api/pull/:secret`, so the dynamic function `api/pull/[secret].js` receives the secret segment in `req.url`. The handler strips the `/api` prefix and compares that segment with `PULL_PATH_SECRET`. Pending commands live in the Vercel Runtime Cache (plus in-process memory as a fallback), one region (`iad1`).
+Vercel serves this as Node.js Functions under `api/`. `vercel.json` rewrites `/pull/:secret` to `/api/pull/:secret`. The handler compares that segment with `PULL_PATH_SECRET`. On Vercel the FIFO and results are stored in Upstash Redis (`iad1`). Local `npm test` uses in-memory storage. A Vercel deploy without the Upstash env vars returns **503** on enqueue and pull instead of silently keeping one command in memory.
+
+### Provision Upstash (required once)
+
+The project already has `QUEUE_SECRET` and `PULL_PATH_SECRET`. It does not have Redis yet.
+
+1. Open https://vercel.com/jayradbus-1275/agent-bridge-pull-queue/stores
+2. **Create** → **Marketplace** → **Upstash Redis** (Hobby).
+3. Connect the database to project **`agent-bridge-pull-queue`** for Production, Preview, and Development. That writes `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`. Do not rotate `QUEUE_SECRET` or `PULL_PATH_SECRET`.
+4. Merging this repo's `main` redeploys production automatically (the project is connected to `JayR91/agent-bridge-pull-queue`). Until that merge, production keeps the one-slot runtime cache. A pull request deploy is a preview URL and does not replace `https://agent-bridge-pull-queue.vercel.app`.
+
+To redeploy production by hand after the env vars exist: Vercel → project **agent-bridge-pull-queue** → Deployments → the `main` deployment → **Redeploy**.
 
 Authenticated durable project (preferred, once JayR91 is logged in):
 
